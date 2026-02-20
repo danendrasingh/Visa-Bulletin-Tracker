@@ -25,9 +25,8 @@ st.set_page_config(page_title="EB-2 & EB-3 India Visa Tracker", layout="wide")
 # Using chr(123) and chr(125) to safely create { and } for CSS without the chat UI breaking them
 hide_st_style = "<style>\n"
 hide_st_style += "#MainMenu " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
-hide_st_style += "header " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
+hide_st_style += ".stDeployButton " + chr(123) + "display: none;" + chr(125) + "\n"
 hide_st_style += "footer " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
-hide_st_style += " " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
 hide_st_style += "</style>"
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
@@ -204,9 +203,15 @@ st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
 st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
 # --- SECRET ADMIN CONTROLS ---
-# Check if the secret query parameter is present in the URL
-query_params = st.query_params.to_dict()
-if query_params.get("admin") == "true":
+# Robust checking of query params that works across all versions of Streamlit seamlessly
+is_admin = False
+try:
+    if str(st.query_params.get("admin", "")).lower() == "true":
+        is_admin = True
+except Exception:
+    pass
+
+if is_admin:
     with st.sidebar:
         st.markdown("### Admin Controls (Unlocked)")
         if st.button("Delete Database & Re-Scrape"):
