@@ -11,7 +11,7 @@ import re
 # --- CONSTANTS & CONFIG ---
 DATA_FILE = 'eb2_india_data.csv'
 
-# Using a Tuple and Dictionary instead of lists to bypass UI parser bugs
+# Using Tuples and Dictionaries to bypass chat platform formatting bugs
 MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december")
 MONTHS_DICT = {
     1: "january", 2: "february", 3: "march", 4: "april",
@@ -19,7 +19,7 @@ MONTHS_DICT = {
     9: "september", 10: "october", 11: "november", 12: "december"
 }
 
-st.set_page_config(page_title="EB-2 India Visa Tracker", layout="wide")
+st.set_page_config(page_title="EB-2 & EB-3 India Visa Tracker", layout="wide")
 
 # --- UTILITY FUNCTIONS ---
 def parse_priority_date(date_str, bulletin_date):
@@ -48,9 +48,8 @@ def get_bulletin_url(month_name, year):
     return f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name.lower()}-{year}.html"
 
 # --- SCRAPING LOGIC ---
-def extract_eb2_india_date(df_table):
-    """Safely finds the intersection of '2ND' row and 'INDIA' column avoiding arrays."""
-    # Convert to standard Python lists without relying on array brackets
+def extract_india_dates(df_table):
+    """Safely finds both '2ND' and '3RD' rows for the 'INDIA' column avoiding arrays."""
     cols_as_list = df_table.columns.values.tolist()
     raw_data = list((cols_as_list,))
     raw_data.extend(df_table.values.tolist())
@@ -65,22 +64,29 @@ def extract_eb2_india_date(df_table):
             break
             
     second_row_idx = None
+    third_row_idx = None
+    
     for i, row in enumerate(raw_data):
         for cell in row:
-            if re.search(r'\b2ND\b', str(cell).upper()):
+            cell_str = str(cell).upper()
+            if second_row_idx is None and re.search(r'\b2ND\b', cell_str):
                 second_row_idx = i
-                break
-        if second_row_idx is not None: 
+            if third_row_idx is None and re.search(r'\b3RD\b', cell_str):
+                third_row_idx = i
+        if second_row_idx is not None and third_row_idx is not None:
             break
             
-    if india_col_idx is not None and second_row_idx is not None:
-        # Loop to find the exact intersection to avoid bracket indexing
+    eb2_date, eb3_date = None, None
+    if india_col_idx is not None:
         for i, row in enumerate(raw_data):
             if i == second_row_idx:
                 for j, cell in enumerate(row):
-                    if j == india_col_idx:
-                        return cell
-    return None
+                    if j == india_col_idx: eb2_date = cell
+            if i == third_row_idx:
+                for j, cell in enumerate(row):
+                    if j == india_col_idx: eb3_date = cell
+                        
+    return eb2_date, eb3_date
 
 def fetch_bulletin_dates(month_name, year):
     url = get_bulletin_url(month_name, year)
@@ -89,48 +95,59 @@ def fetch_bulletin_dates(month_name, year):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200: 
-            return pd.NaT, pd.NaT
+            return pd.NaT, pd.NaT, pd.NaT, pd.NaT
         
         soup = BeautifulSoup(response.content, 'lxml')
         tables = pd.read_html(str(soup))
         
-        dates_found = list()
+        dates_found_eb2 = list()
+        dates_found_eb3 = list()
+        
         for df_table in tables:
-            extracted_date = extract_eb2_india_date(df_table)
-            if extracted_date:
-                dates_found.append(extracted_date)
+            eb2_d, eb3_d = extract_india_dates(df_table)
+            if eb2_d: dates_found_eb2.append(eb2_d)
+            if eb3_d: dates_found_eb3.append(eb3_d)
                 
         bulletin_date = pd.to_datetime(f"01 {month_name} {year}")
-        fad, dof = pd.NaT, pd.NaT
+        eb2_fad, eb2_dof, eb3_fad, eb3_dof = pd.NaT, pd.NaT, pd.NaT, pd.NaT
         
-        # Determine FAD vs DOF using iterator to avoid bracket indexing
-        for idx, date_val in enumerate(dates_found):
-            if idx == 0:
-                fad = parse_priority_date(date_val, bulletin_date)
-            elif idx == 1:
-                dof = parse_priority_date(date_val, bulletin_date)
+        for idx, date_val in enumerate(dates_found_eb2):
+            if idx == 0: eb2_fad = parse_priority_date(date_val, bulletin_date)
+            elif idx == 1: eb2_dof = parse_priority_date(date_val, bulletin_date)
             
-        return fad, dof
+        for idx, date_val in enumerate(dates_found_eb3):
+            if idx == 0: eb3_fad = parse_priority_date(date_val, bulletin_date)
+            elif idx == 1: eb3_dof = parse_priority_date(date_val, bulletin_date)
+            
+        return eb2_fad, eb2_dof, eb3_fad, eb3_dof
     except Exception:
-        return pd.NaT, pd.NaT
+        return pd.NaT, pd.NaT, pd.NaT, pd.NaT
 
 def init_or_update_db():
+    # Auto-Upgrade Database Schema if EB3 column is missing
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        # Using DataFrame assign method to avoid bracket access
-        df = df.assign(Bulletin_Date=pd.to_datetime(df.Bulletin_Date))
-        df = df.assign(Date_of_Filing=pd.to_datetime(df.Date_of_Filing))
-        df = df.assign(Final_Action_Date=pd.to_datetime(df.Final_Action_Date))
+        if not hasattr(df, 'EB3_Filing'):
+            st.toast("Upgrading Database to support EB-3... Re-scraping!")
+            os.remove(DATA_FILE)
+            df = pd.DataFrame(columns=('Bulletin_Date', 'EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'))
+        else:
+            df = df.assign(Bulletin_Date=pd.to_datetime(df.Bulletin_Date))
+            df = df.assign(EB2_Filing=pd.to_datetime(df.EB2_Filing))
+            df = df.assign(EB2_FAD=pd.to_datetime(df.EB2_FAD))
+            df = df.assign(EB3_Filing=pd.to_datetime(df.EB3_Filing))
+            df = df.assign(EB3_FAD=pd.to_datetime(df.EB3_FAD))
     else:
-        df = pd.DataFrame(columns=('Bulletin_Date', 'Date_of_Filing', 'Final_Action_Date'))
+        df = pd.DataFrame(columns=('Bulletin_Date', 'EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'))
         
     today = datetime.today()
     start_date = datetime(2017, 1, 1)
-    target_date = datetime(today.year, today.month, 1)
     
-    if today.day >= 20:
-        target_date = target_date + pd.DateOffset(months=1)
-        
+    # Always try to fetch up to 1 month into the future (Dynamic Daily Check)
+    next_month = today + pd.DateOffset(months=1)
+    target_date = datetime(next_month.year, next_month.month, 1)
+    current_month_start = datetime(today.year, today.month, 1)
+    
     dates_to_check = pd.date_range(start=start_date, end=target_date, freq='MS')
     
     missing_dates = list()
@@ -139,7 +156,6 @@ def init_or_update_db():
             missing_dates.append(d)
             
     if missing_dates:
-        st.warning(f"Fetching real historical data for {len(missing_dates)} missing months... This only happens once!")
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -148,35 +164,50 @@ def init_or_update_db():
             month_name = MONTHS_DICT.get(d.month)
             status_text.text(f"Scraping {month_name.capitalize()} {d.year}...")
             
-            fad, dof = fetch_bulletin_dates(month_name, d.year)
+            eb2_fad, eb2_dof, eb3_fad, eb3_dof = fetch_bulletin_dates(month_name, d.year)
             
-            new_rows.append({
-                'Bulletin_Date': d,
-                'Date_of_Filing': dof,
-                'Final_Action_Date': fad
-            })
+            # If the State Dept website returns a 404 for this month (Not published yet)
+            if pd.isna(eb2_fad) and pd.isna(eb3_fad):
+                if d >= current_month_start:
+                    # It's an unpublished future month. Stop checking gracefully.
+                    break 
+                else:
+                    # It's an old historic month format error. Skip and continue.
+                    continue
+            
+            new_rows.append(dict(
+                Bulletin_Date=d,
+                EB2_Filing=eb2_dof,
+                EB2_FAD=eb2_fad,
+                EB3_Filing=eb3_dof,
+                EB3_FAD=eb3_fad
+            ))
             
             progress_bar.progress((i + 1) / len(missing_dates))
             time.sleep(0.3) 
             
-        df_new = pd.DataFrame(new_rows)
-        # Tuple used for concat to avoid array brackets
-        df = pd.concat((df, df_new), ignore_index=True)
-        df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
-        df.to_csv(DATA_FILE, index=False)
-        status_text.text("Database fully synchronized with State Dept real dates!")
-        time.sleep(2)
-        st.rerun()
+        if new_rows:
+            df_new = pd.DataFrame(new_rows)
+            df = pd.concat((df, df_new), ignore_index=True)
+            df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
+            df.to_csv(DATA_FILE, index=False)
+            status_text.text("Database fully synchronized with State Dept real dates!")
+            time.sleep(2)
+            st.rerun()
+        else:
+            status_text.text("Checked daily updates. No new bulletins published yet.")
+            time.sleep(1)
+            status_text.empty()
+            progress_bar.empty()
         
     return df
 
 # --- UI & CHARTS ---
-st.title("📈 True EB-2 India Visa Bulletin Tracker")
+st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
 st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
 with st.sidebar:
     st.markdown("### Admin Controls")
-    st.markdown("If charts look wrong or linear, click below to wipe the mock data and fetch real history.")
     if st.button("Delete Database & Re-Scrape"):
         if os.path.exists(DATA_FILE):
             os.remove(DATA_FILE)
@@ -185,8 +216,8 @@ with st.sidebar:
 with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
 
-# Tuple used for subset to avoid array brackets
-df_clean = df.dropna(subset=('Date_of_Filing', 'Final_Action_Date'), how='all')
+# Filter out empty rows 
+df_clean = df.dropna(subset=('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'), how='all')
 
 # Layout Metrics
 col1, col2, col3 = st.columns(3)
@@ -198,36 +229,49 @@ with col1:
     
 with col2:
     val2 = "N/A"
-    if not df_clean.empty and pd.notna(df_clean.Date_of_Filing.tail(1).item()):
-        val2 = df_clean.Date_of_Filing.tail(1).item().strftime('%d %b %Y')
-    st.metric(label="Latest Date of Filing", value=val2)
+    if not df_clean.dropna(subset=('EB2_Filing',)).empty:
+        val2 = df_clean.dropna(subset=('EB2_Filing',)).EB2_Filing.tail(1).item().strftime('%d %b %Y')
+    st.metric(label="Latest EB-2 Date of Filing", value=val2)
     
 with col3:
     val3 = "N/A"
-    if not df_clean.empty and pd.notna(df_clean.Final_Action_Date.tail(1).item()):
-        val3 = df_clean.Final_Action_Date.tail(1).item().strftime('%d %b %Y')
-    st.metric(label="Latest Final Action Date", value=val3)
+    if not df_clean.dropna(subset=('EB3_Filing',)).empty:
+        val3 = df_clean.dropna(subset=('EB3_Filing',)).EB3_Filing.tail(1).item().strftime('%d %b %Y')
+    st.metric(label="Latest EB-3 Date of Filing", value=val3)
 
 st.divider()
 
+# Prepare DataFrames for plotting (Mapping columns cleanly for the legend)
+df_plot_dof = pd.DataFrame(dict(
+    Bulletin_Date=df_clean.Bulletin_Date,
+    EB2=df_clean.EB2_Filing,
+    EB3=df_clean.EB3_Filing
+))
+
+df_plot_fad = pd.DataFrame(dict(
+    Bulletin_Date=df_clean.Bulletin_Date,
+    EB2=df_clean.EB2_FAD,
+    EB3=df_clean.EB3_FAD
+))
+
 # Chart 1: Date of Filing
-st.subheader("🗓️ Date of Filing Movement")
-fig_dof = px.line(df_clean.dropna(subset=('Date_of_Filing',)), x='Bulletin_Date', y='Date_of_Filing', 
+st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
+fig_dof = px.line(df_plot_dof.dropna(subset=('EB2', 'EB3'), how='all'), 
+                  x='Bulletin_Date', y=('EB2', 'EB3'), 
                   markers=True, 
-                  labels={'Bulletin_Date': 'Visa Bulletin Release Month', 'Date_of_Filing': 'Cutoff Priority Date'},
+                  labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
 fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-fig_dof.update_traces(line_color='#1f77b4')
 st.plotly_chart(fig_dof, use_container_width=True)
 
 # Chart 2: Final Action Date
-st.subheader("⚖️ Final Action Date Movement")
-fig_fad = px.line(df_clean.dropna(subset=('Final_Action_Date',)), x='Bulletin_Date', y='Final_Action_Date', 
+st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
+fig_fad = px.line(df_plot_fad.dropna(subset=('EB2', 'EB3'), how='all'), 
+                  x='Bulletin_Date', y=('EB2', 'EB3'), 
                   markers=True, 
-                  labels={'Bulletin_Date': 'Visa Bulletin Release Month', 'Final_Action_Date': 'Cutoff Priority Date'},
+                  labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
 fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-fig_fad.update_traces(line_color='#d62728')
 st.plotly_chart(fig_fad, use_container_width=True)
 
 # Data Table
