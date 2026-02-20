@@ -3,158 +3,207 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import time
+import re
 
 # --- CONSTANTS & CONFIG ---
 DATA_FILE = 'eb2_india_data.csv'
-MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+MONTHS =
 
 st.set_page_config(page_title="EB-2 India Visa Tracker", layout="wide")
 
 # --- UTILITY FUNCTIONS ---
 def parse_priority_date(date_str, bulletin_date):
-    """Converts strings like '15SEP13', 'C', or 'U' into standard dates."""
+    """Converts varying State Dept string formats into standard dates."""
+    if not date_str: return pd.NaT
     date_str = str(date_str).strip().upper()
-    if date_str == 'C':
-        return bulletin_date # If Current, priority date effectively equals bulletin date
-    if date_str == 'U' or date_str == 'UNAUTHORIZED':
+    
+    if date_str in:
+        return bulletin_date
+    if date_str in:
         return pd.NaT
+        
     try:
+        # Tries specific formats like '01DEC13' or '15SEP13'
         return pd.to_datetime(date_str, format='%d%b%y')
     except:
-        return pd.NaT
+        try:
+            # Fallback to general pandas parser
+            return pd.to_datetime(date_str)
+        except:
+            return pd.NaT
 
-def get_fiscal_year(year, month_idx):
-    """US Dept of State uses Fiscal Years. Oct-Dec belong to the NEXT year."""
-    if month_idx >= 10: # October is index 10 (1-based)
-        return year + 1
-    return year
+def get_bulletin_url(month_name, year):
+    """Builds the URL taking into account the US Gov Fiscal Year (Starts in Oct)"""
+    month_idx = MONTHS.index(month_name.lower()) + 1
+    fiscal_year = year + 1 if month_idx >= 10 else year
+    return f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name.lower()}-{year}.html"
 
 # --- SCRAPING LOGIC ---
-def scrape_bulletin(month_name, year):
-    month_idx = MONTHS.index(month_name.lower()) + 1
-    fiscal_year = get_fiscal_year(year, month_idx)
+def extract_eb2_india_date(df):
+    """Safely finds the intersection of '2ND' row and 'INDIA' column in any HTML table format."""
+    # Convert DataFrame (including headers) into a raw 2D list to avoid Pandas index formatting issues
+    raw_data = + df.values.tolist()
     
-    url = f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name}-{year}.html"
+    india_col_idx = None
+    for row in raw_data:
+        for j, cell in enumerate(row):
+            if 'INDIA' in str(cell).upper():
+                india_col_idx = j
+                break
+        if india_col_idx is not None: break
+            
+    second_row_idx = None
+    for i, row in enumerate(raw_data):
+        for cell in row:
+            # Regex ensures we match '2ND' and not '2A' or '2B' in family tables
+            if re.search(r'\b2ND\b', str(cell).upper()):
+                second_row_idx = i
+                break
+        if second_row_idx is not None: break
+            
+    if india_col_idx is not None and second_row_idx is not None:
+        return raw_data
+    return None
+
+def fetch_bulletin_dates(month_name, year):
+    url = get_bulletin_url(month_name, year)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code != 200:
-        return None, None # Bulletin not published yet
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200: return pd.NaT, pd.NaT
         
-    soup = BeautifulSoup(response.content, 'html.parser')
-    tables = pd.read_html(str(soup))
-    
-    fad_date, dof_date = None, None
-    bulletin_date = pd.to_datetime(f"01 {month_name} {year}")
-
-    for df in tables:
-        # Convert all to string and upper case to standardize search
-        df = df.astype(str).applymap(lambda x: x.upper().strip())
+        soup = BeautifulSoup(response.content, 'lxml')
+        tables = pd.read_html(str(soup))
         
-        # Check if this is an employment table
-        if df.isin(['2ND']).any().any() and df.isin(['INDIA']).any().any():
-            try:
-                # Find the row for 2nd preference
-                row_idx = df[df.apply(lambda row: row.astype(str).str.contains('2ND').any(), axis=1)].index[0]
+        dates_found =[]
+        for df in tables:
+            extracted_date = extract_eb2_india_date(df)
+            if extracted_date:
+                dates_found.append(extracted_date)
                 
-                # Find the column for INDIA
-                col_idx = None
-                for col in df.columns:
-                    if df[col].astype(str).str.contains('INDIA').any():
-                        col_idx = col
-                        break
-                
-                if col_idx is not None:
-                    extracted_date = df.at[row_idx, col_idx]
-                    
-                    # Distinguish between FAD and DOF based on text before the table
-                    if "FINAL ACTION" in str(soup).upper() and fad_date is None:
-                        fad_date = parse_priority_date(extracted_date, bulletin_date)
-                    elif "FILING" in str(soup).upper():
-                        dof_date = parse_priority_date(extracted_date, bulletin_date)
-            except Exception as e:
-                continue
+        bulletin_date = pd.to_datetime(f"01 {month_name} {year}")
+        
+        fad, dof = pd.NaT, pd.NaT
+        # Usually, Table 1 is Final Action Date (FAD), Table 2 is Date of Filing (DOF)
+        if len(dates_found) >= 1: fad = parse_priority_date(dates_found, bulletin_date)
+        if len(dates_found) >= 2: dof = parse_priority_date(dates_found, bulletin_date)
+            
+        return fad, dof
+    except Exception as e:
+        return pd.NaT, pd.NaT
 
-    # Fallback to current mocked data format from your prompt if exact table parsing fails
-    # (HTML structures vary wildly historically)
-    return fad_date, dof_date
-
-def update_database():
-    """Scrapes the next month's bulletin if today is past the 25th."""
+def init_or_update_db():
+    # Load existing real data if it exists
     if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE, parse_dates=['Bulletin_Date', 'Date_of_Filing', 'Final_Action_Date'])
+        df = pd.read_csv(DATA_FILE)
+        df = pd.to_datetime(df)
+        df = pd.to_datetime(df)
+        df = pd.to_datetime(df)
     else:
-        # Generate initial Historical Database (Mocked for 2017-current to show how the app works)
-        st.info("Creating historical database...")
-        dates = pd.date_range(start='2017-01-01', end=datetime.today(), freq='MS')
-        df = pd.DataFrame({'Bulletin_Date': dates})
-        # Mocking realistic slow movement for demonstration
-        df['Date_of_Filing'] = df['Bulletin_Date'] - pd.Timedelta(days=365*10) 
-        df['Final_Action_Date'] = df['Bulletin_Date'] - pd.Timedelta(days=365*11)
-    
-    # Check for next month
-    today = datetime.today()
-    if today.day >= 25:
-        next_month_date = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-        month_name = MONTHS[next_month_date.month - 1]
-        year = next_month_date.year
+        df = pd.DataFrame(columns=)
         
-        if next_month_date not in df['Bulletin_Date'].values:
-            fad, dof = scrape_bulletin(month_name, year)
-            if fad and dof:
-                new_row = pd.DataFrame({
-                    'Bulletin_Date': [next_month_date],
-                    'Date_of_Filing': [dof],
-                    'Final_Action_Date': [fad]
-                })
-                df = pd.concat([df, new_row], ignore_index=True)
-                df.to_csv(DATA_FILE, index=False)
-                st.toast(f"Successfully scraped data for {month_name.capitalize()} {year}!")
+    # Calculate what months we need (from Jan 2017 to Current/Next Month)
+    today = datetime.today()
+    start_date = datetime(2017, 1, 1)
+    target_date = datetime(today.year, today.month, 1)
     
-    df.to_csv(DATA_FILE, index=False)
+    if today.day >= 25:
+        target_date = target_date + pd.DateOffset(months=1)
+        
+    dates_to_check = pd.date_range(start=start_date, end=target_date, freq='MS')
+    
+    # Identify which dates are missing from the CSV
+    missing_dates =[]
+    for d in dates_to_check:
+        if df.empty or d not in df.values:
+            missing_dates.append(d)
+            
+    # Scrape the missing dates (with a progress bar so the app doesn't look frozen)
+    if missing_dates:
+        st.warning(f"Fetching real historical data for {len(missing_dates)} missing months... This only happens once!")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        new_rows =[]
+        for i, d in enumerate(missing_dates):
+            month_name = MONTHS
+            status_text.text(f"Scraping {month_name.capitalize()} {d.year}...")
+            
+            fad, dof = fetch_bulletin_dates(month_name, d.year)
+            
+            new_rows.append({
+                'Bulletin_Date': d,
+                'Date_of_Filing': dof,
+                'Final_Action_Date': fad
+            })
+            
+            progress_bar.progress((i + 1) / len(missing_dates))
+            time.sleep(0.3) # Respect State Dept servers
+            
+        df_new = pd.DataFrame(new_rows)
+        df = pd.concat(, ignore_index=True)
+        df = df.sort_values('Bulletin_Date').reset_index(drop=True)
+        df.to_csv(DATA_FILE, index=False)
+        st.success("Database fully synchronized with State Dept real dates!")
+        time.sleep(2)
+        st.rerun()
+        
     return df
 
 # --- UI & CHARTS ---
-st.title("📈 EB-2 India Visa Bulletin Tracker")
-st.markdown("Tracks the historical movement of Date of Filing and Final Action Dates since 2017.")
+st.title("📈 True EB-2 India Visa Bulletin Tracker")
+st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
+
+# Manage DB Reset
+with st.sidebar:
+    st.markdown("### Admin Controls")
+    if st.button("Delete Database & Re-Scrape"):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            st.rerun()
 
 # Load Data
-with st.spinner("Checking for updates and loading data..."):
-    df = update_database()
+with st.spinner("Checking for missing bulletin releases..."):
+    df = init_or_update_db()
 
-# Layout
-col1, col2 = st.columns(2)
+# Filter out NaT (Not a Time) values for cleaner charting
+df_clean = df.dropna(subset=)
+
+# Layout Metrics
+col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric(label="Latest Bulletin Month", value=df['Bulletin_Date'].iloc[-1].strftime('%B %Y'))
+    st.metric(label="Latest Bulletin Month", value=df_clean.iloc.strftime('%B %Y'))
 with col2:
-    st.metric(label="Latest Final Action Date", value=df['Final_Action_Date'].iloc[-1].strftime('%d %b %Y'))
+    st.metric(label="Latest Date of Filing", value=df_clean.iloc.strftime('%d %b %Y'))
+with col3:
+    st.metric(label="Latest Final Action Date", value=df_clean.iloc.strftime('%d %b %Y'))
 
 st.divider()
 
 # Chart 1: Date of Filing
-st.subheader("🗓️ Date of Filing Movement (EB-2 India)")
-fig_dof = px.line(df, x='Bulletin_Date', y='Date_of_Filing', 
+st.subheader("🗓️ Date of Filing Movement")
+fig_dof = px.line(df_clean, x='Bulletin_Date', y='Date_of_Filing', 
                   markers=True, 
-                  labels={'Bulletin_Date': 'Visa Bulletin Month', 'Date_of_Filing': 'Priority Date'},
-                  line_shape='hv') # Step-chart looks best for visa bulletins
+                  labels={'Bulletin_Date': 'Visa Bulletin Release Month', 'Date_of_Filing': 'Cutoff Priority Date'},
+                  line_shape='hv')
 fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 fig_dof.update_traces(line_color='#1f77b4')
 st.plotly_chart(fig_dof, use_container_width=True)
 
 # Chart 2: Final Action Date
-st.subheader("⚖️ Final Action Date Movement (EB-2 India)")
-fig_fad = px.line(df, x='Bulletin_Date', y='Final_Action_Date', 
+st.subheader("⚖️ Final Action Date Movement")
+fig_fad = px.line(df_clean, x='Bulletin_Date', y='Final_Action_Date', 
                   markers=True, 
-                  labels={'Bulletin_Date': 'Visa Bulletin Month', 'Final_Action_Date': 'Priority Date'},
+                  labels={'Bulletin_Date': 'Visa Bulletin Release Month', 'Final_Action_Date': 'Cutoff Priority Date'},
                   line_shape='hv')
 fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 fig_fad.update_traces(line_color='#d62728')
 st.plotly_chart(fig_fad, use_container_width=True)
 
 # Data Table
-with st.expander("View Raw Data"):
+with st.expander("View Scraped Raw Data"):
     st.dataframe(df.sort_values(by="Bulletin_Date", ascending=False).reset_index(drop=True))
