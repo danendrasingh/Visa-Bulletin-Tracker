@@ -128,7 +128,7 @@ def init_or_update_db():
     start_date = datetime(2017, 1, 1)
     target_date = datetime(today.year, today.month, 1)
     
-    if today.day >= 25:
+    if today.day >= 20:
         target_date = target_date + pd.DateOffset(months=1)
         
     dates_to_check = pd.date_range(start=start_date, end=target_date, freq='MS')
