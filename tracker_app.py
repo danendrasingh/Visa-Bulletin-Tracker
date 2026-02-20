@@ -21,9 +21,18 @@ MONTHS_DICT = {
 
 st.set_page_config(page_title="EB-2 & EB-3 India Visa Tracker", layout="wide")
 
+# --- HIDE STREAMLIT BRANDING & MENUS ---
+# Using chr(123) and chr(125) to safely create { and } for CSS without the chat UI breaking them
+hide_st_style = "<style>\n"
+hide_st_style += "#MainMenu " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
+hide_st_style += "header " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
+hide_st_style += "footer " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
+hide_st_style += " " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
+hide_st_style += "</style>"
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # --- UTILITY FUNCTIONS ---
 def parse_priority_date(date_str, bulletin_date):
-    """Converts varying State Dept string formats into standard dates."""
     if not date_str or pd.isna(date_str): 
         return pd.NaT
     date_str = str(date_str).strip().upper()
@@ -42,14 +51,12 @@ def parse_priority_date(date_str, bulletin_date):
             return pd.NaT
 
 def get_bulletin_url(month_name, year):
-    """Builds the URL taking into account the US Gov Fiscal Year."""
     month_idx = MONTHS.index(month_name.lower()) + 1
     fiscal_year = year + 1 if month_idx >= 10 else year
     return f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name.lower()}-{year}.html"
 
 # --- SCRAPING LOGIC ---
 def extract_india_dates(df_table):
-    """Safely finds both '2ND' and '3RD' rows for the 'INDIA' column avoiding arrays."""
     cols_as_list = df_table.columns.values.tolist()
     raw_data = list((cols_as_list,))
     raw_data.extend(df_table.values.tolist())
@@ -126,23 +133,17 @@ def fetch_bulletin_dates(month_name, year):
 def init_or_update_db():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        if not hasattr(df, 'EB3_Filing'):
-            st.toast("Upgrading Database to support EB-3... Re-scraping!")
-            os.remove(DATA_FILE)
-            df = pd.DataFrame(columns=('Bulletin_Date', 'EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'))
-        else:
-            df = df.assign(Bulletin_Date=pd.to_datetime(df.Bulletin_Date))
-            df = df.assign(EB2_Filing=pd.to_datetime(df.EB2_Filing))
-            df = df.assign(EB2_FAD=pd.to_datetime(df.EB2_FAD))
-            df = df.assign(EB3_Filing=pd.to_datetime(df.EB3_Filing))
-            df = df.assign(EB3_FAD=pd.to_datetime(df.EB3_FAD))
+        df = df.assign(Bulletin_Date=pd.to_datetime(df.Bulletin_Date))
+        df = df.assign(EB2_Filing=pd.to_datetime(df.EB2_Filing))
+        df = df.assign(EB2_FAD=pd.to_datetime(df.EB2_FAD))
+        df = df.assign(EB3_Filing=pd.to_datetime(df.EB3_Filing))
+        df = df.assign(EB3_FAD=pd.to_datetime(df.EB3_FAD))
     else:
         df = pd.DataFrame(columns=('Bulletin_Date', 'EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'))
         
     today = datetime.today()
     start_date = datetime(2017, 1, 1)
     
-    # Always try to fetch up to 1 month into the future (Dynamic Daily Check)
     next_month = today + pd.DateOffset(months=1)
     target_date = datetime(next_month.year, next_month.month, 1)
     current_month_start = datetime(today.year, today.month, 1)
@@ -165,13 +166,10 @@ def init_or_update_db():
             
             eb2_fad, eb2_dof, eb3_fad, eb3_dof = fetch_bulletin_dates(month_name, d.year)
             
-            # If the State Dept website returns a 404 for this month (Not published yet)
             if pd.isna(eb2_fad) and pd.isna(eb3_fad):
                 if d >= current_month_start:
-                    # It's an unpublished future month. Stop checking gracefully.
                     break 
                 else:
-                    # It's an old historic month format error. Skip and continue.
                     continue
             
             new_rows.append(dict(
@@ -194,28 +192,31 @@ def init_or_update_db():
             time.sleep(2)
             st.rerun()
         else:
-            status_text.text("Checked daily updates. No new bulletins published yet.")
             time.sleep(1)
             status_text.empty()
             progress_bar.empty()
         
     return df
 
+
 # --- UI & CHARTS ---
 st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
 st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
-with st.sidebar:
-    st.markdown("### Admin Controls")
-    if st.button("Delete Database & Re-Scrape"):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-            st.rerun()
+# --- SECRET ADMIN CONTROLS ---
+# Check if the secret query parameter is present in the URL
+query_params = st.query_params.to_dict()
+if query_params.get("admin") == "true":
+    with st.sidebar:
+        st.markdown("### Admin Controls (Unlocked)")
+        if st.button("Delete Database & Re-Scrape"):
+            if os.path.exists(DATA_FILE):
+                os.remove(DATA_FILE)
+                st.rerun()
 
 with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
 
-# Filter out empty rows 
 df_clean = df.dropna(subset=list(('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD')), how='all')
 
 # Layout Metrics
@@ -240,7 +241,7 @@ with col3:
 
 st.divider()
 
-# Prepare DataFrames for plotting (Mapping columns cleanly for the legend)
+# Prepare DataFrames for plotting
 df_plot_dof = pd.DataFrame(dict(
     Bulletin_Date=df_clean.Bulletin_Date,
     EB2=df_clean.EB2_Filing,
@@ -255,7 +256,6 @@ df_plot_fad = pd.DataFrame(dict(
 
 # Chart 1: Date of Filing
 st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
-# Note the fix below: using list(('EB2', 'EB3')) prevents Plotly from crashing
 fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'), 
                   x='Bulletin_Date', y=list(('EB2', 'EB3')), 
                   markers=True, 
@@ -266,7 +266,6 @@ st.plotly_chart(fig_dof, use_container_width=True)
 
 # Chart 2: Final Action Date
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
-# Note the fix below: using list(('EB2', 'EB3')) prevents Plotly from crashing
 fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'), 
                   x='Bulletin_Date', y=list(('EB2', 'EB3')), 
                   markers=True, 
