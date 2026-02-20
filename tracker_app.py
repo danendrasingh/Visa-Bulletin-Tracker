@@ -124,7 +124,6 @@ def fetch_bulletin_dates(month_name, year):
         return pd.NaT, pd.NaT, pd.NaT, pd.NaT
 
 def init_or_update_db():
-    # Auto-Upgrade Database Schema if EB3 column is missing
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
         if not hasattr(df, 'EB3_Filing'):
@@ -217,7 +216,7 @@ with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
 
 # Filter out empty rows 
-df_clean = df.dropna(subset=('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD'), how='all')
+df_clean = df.dropna(subset=list(('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD')), how='all')
 
 # Layout Metrics
 col1, col2, col3 = st.columns(3)
@@ -229,14 +228,14 @@ with col1:
     
 with col2:
     val2 = "N/A"
-    if not df_clean.dropna(subset=('EB2_Filing',)).empty:
-        val2 = df_clean.dropna(subset=('EB2_Filing',)).EB2_Filing.tail(1).item().strftime('%d %b %Y')
+    if not df_clean.dropna(subset=list(('EB2_Filing',))).empty:
+        val2 = df_clean.dropna(subset=list(('EB2_Filing',))).EB2_Filing.tail(1).item().strftime('%d %b %Y')
     st.metric(label="Latest EB-2 Date of Filing", value=val2)
     
 with col3:
     val3 = "N/A"
-    if not df_clean.dropna(subset=('EB3_Filing',)).empty:
-        val3 = df_clean.dropna(subset=('EB3_Filing',)).EB3_Filing.tail(1).item().strftime('%d %b %Y')
+    if not df_clean.dropna(subset=list(('EB3_Filing',))).empty:
+        val3 = df_clean.dropna(subset=list(('EB3_Filing',))).EB3_Filing.tail(1).item().strftime('%d %b %Y')
     st.metric(label="Latest EB-3 Date of Filing", value=val3)
 
 st.divider()
@@ -256,8 +255,9 @@ df_plot_fad = pd.DataFrame(dict(
 
 # Chart 1: Date of Filing
 st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
-fig_dof = px.line(df_plot_dof.dropna(subset=('EB2', 'EB3'), how='all'), 
-                  x='Bulletin_Date', y=('EB2', 'EB3'), 
+# Note the fix below: using list(('EB2', 'EB3')) prevents Plotly from crashing
+fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'), 
+                  x='Bulletin_Date', y=list(('EB2', 'EB3')), 
                   markers=True, 
                   labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
@@ -266,8 +266,9 @@ st.plotly_chart(fig_dof, use_container_width=True)
 
 # Chart 2: Final Action Date
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
-fig_fad = px.line(df_plot_fad.dropna(subset=('EB2', 'EB3'), how='all'), 
-                  x='Bulletin_Date', y=('EB2', 'EB3'), 
+# Note the fix below: using list(('EB2', 'EB3')) prevents Plotly from crashing
+fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'), 
+                  x='Bulletin_Date', y=list(('EB2', 'EB3')), 
                   markers=True, 
                   labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
