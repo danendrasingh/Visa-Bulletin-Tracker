@@ -7,7 +7,6 @@ from datetime import datetime
 import os
 import time
 import re
-import urllib.parse
 
 # --- CONSTANTS & CONFIG ---
 DATA_FILE = 'eb2_india_data.csv'
@@ -54,28 +53,24 @@ def get_bulletin_url(month_name, year):
     return f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name.lower()}-{year}.html"
 
 def fetch_html_content(url):
-    """Fetches HTML and uses free proxies if the US Gov firewall blocks the Cloud IP"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+    """Uses Multiple Fallbacks including the Wayback Machine to bypass the Firewall"""
+    headers = dict()
+    headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
     
-    # 1. Try Direct Request First
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200 and "Access Denied" not in res.text:
-            return res.text
-    except Exception:
-        pass
-        
-    # 2. Proxy Fallback (Bypasses Akamai Firewall blocking Streamlit Cloud)
-    try:
-        proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
-        proxy_res = requests.get(proxy_url, headers=headers, timeout=15)
-        if proxy_res.status_code == 200 and "Access Denied" not in proxy_res.text:
-            return proxy_res.text
-    except Exception:
-        pass
+    # We rotate through direct access, the Internet Archive, and a public proxy
+    urls_to_try = (
+        url,
+        "https://web.archive.org/web/2/" + url,
+        "https://api.codetabs.com/v1/proxy?quest=" + url
+    )
+
+    for proxy_url in urls_to_try:
+        try:
+            res = requests.get(proxy_url, headers=headers, timeout=15)
+            if res.status_code == 200 and "Access Denied" not in res.text:
+                return res.text
+        except Exception:
+            pass
 
     return None
 
@@ -83,7 +78,6 @@ def fetch_html_content(url):
 def extract_india_dates(df_table):
     raw_data = list()
     
-    # Securely map headers and rows
     if isinstance(df_table.columns, pd.MultiIndex):
         raw_data.extend(list(list(c) for c in df_table.columns.values))
     else:
@@ -190,7 +184,7 @@ def init_or_update_db():
         
         for i, d in enumerate(missing_dates):
             month_name = MONTHS_DICT.get(d.month)
-            status_text.text(f"Proxy Scraping {month_name.capitalize()} {d.year} (Bypassing Firewall)...")
+            status_text.text(f"Fetching {month_name.capitalize()} {d.year} (via Archive)...")
             
             eb2_fad, eb2_dof, eb3_fad, eb3_dof = fetch_bulletin_dates(month_name, d.year)
             
@@ -210,26 +204,26 @@ def init_or_update_db():
             ))
             
             progress_bar.progress((i + 1) / len(missing_dates))
-            time.sleep(0.3) 
+            time.sleep(0.5) 
             
         if new_rows:
             df_new = pd.DataFrame(new_rows)
             df = pd.concat((df, df_new), ignore_index=True)
             df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
             df.to_csv(DATA_FILE, index=False)
-            status_text.success(f"Database synced! ({skipped_count} invalid historical links bypassed)")
+            status_text.success("Database synced!")
             time.sleep(2)
             st.rerun()
         else:
             time.sleep(1)
-            status_text.error("Network firewall blocked the request entirely. Upload historical CSV manually.")
+            status_text.error("Network firewall blocked the request entirely. Run app locally to generate CSV.")
             progress_bar.empty()
         
     return df
 
 # --- UI & CHARTS ---
 st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
-st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
+st.markdown("Tracks Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
 is_admin = False
 try:
@@ -289,7 +283,6 @@ df_plot_fad = pd.DataFrame(dict(
 st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
 df_plot_dof_clean = df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all')
 
-# Prevent crash if data is empty
 if not df_plot_dof_clean.empty:
     fig_dof = px.line(df_plot_dof_clean, 
                       x='Bulletin_Date', y=list(('EB2', 'EB3')), 
@@ -299,12 +292,11 @@ if not df_plot_dof_clean.empty:
     fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
     st.plotly_chart(fig_dof, use_container_width=True, key="dof_chart")
 else:
-    st.info("No data available to plot Date of Filing.")
+    st.info("No data available to plot Date of Filing. Please upload historical CSV.")
 
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
 df_plot_fad_clean = df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all')
 
-# Prevent crash if data is empty
 if not df_plot_fad_clean.empty:
     fig_fad = px.line(df_plot_fad_clean, 
                       x='Bulletin_Date', y=list(('EB2', 'EB3')), 
@@ -314,7 +306,7 @@ if not df_plot_fad_clean.empty:
     fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
     st.plotly_chart(fig_fad, use_container_width=True, key="fad_chart")
 else:
-    st.info("No data available to plot Final Action Date.")
+    st.info("No data available to plot Final Action Date. Please upload historical CSV.")
 
 with st.expander("View Scraped Raw Data"):
     st.dataframe(df.sort_values(by="Bulletin_Date", ascending=False).reset_index(drop=True))
