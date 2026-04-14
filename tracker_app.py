@@ -11,7 +11,6 @@ import re
 # --- CONSTANTS & CONFIG ---
 DATA_FILE = 'eb2_india_data.csv'
 
-# Using Tuples and Dictionaries to bypass chat platform formatting bugs
 MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december")
 MONTHS_DICT = {
     1: "january", 2: "february", 3: "march", 4: "april",
@@ -22,7 +21,6 @@ MONTHS_DICT = {
 st.set_page_config(page_title="EB-2 & EB-3 India Visa Tracker", layout="wide")
 
 # --- HIDE STREAMLIT BRANDING & MENUS ---
-# Using chr(123) and chr(125) to safely create { and } for CSS without the chat UI breaking them
 hide_st_style = "<style>\n"
 hide_st_style += "#MainMenu " + chr(123) + "visibility: hidden;" + chr(125) + "\n"
 hide_st_style += ".stDeployButton " + chr(123) + "display: none;" + chr(125) + "\n"
@@ -197,13 +195,10 @@ def init_or_update_db():
         
     return df
 
-
 # --- UI & CHARTS ---
 st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
 st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
-# --- SECRET ADMIN CONTROLS ---
-# Robust checking of query params that works across all versions of Streamlit seamlessly
 is_admin = False
 try:
     if str(st.query_params.get("admin", "")).lower() == "true":
@@ -224,7 +219,6 @@ with st.spinner("Checking for missing bulletin releases..."):
 
 df_clean = df.dropna(subset=list(('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD')), how='all')
 
-# Layout Metrics
 col1, col2, col3 = st.columns(3)
 with col1:
     val1 = "N/A"
@@ -246,7 +240,6 @@ with col3:
 
 st.divider()
 
-# Prepare DataFrames for plotting
 df_plot_dof = pd.DataFrame(dict(
     Bulletin_Date=df_clean.Bulletin_Date,
     EB2=df_clean.EB2_Filing,
@@ -259,7 +252,6 @@ df_plot_fad = pd.DataFrame(dict(
     EB3=df_clean.EB3_FAD
 ))
 
-# Chart 1: Date of Filing
 st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
 fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'), 
                   x='Bulletin_Date', y=list(('EB2', 'EB3')), 
@@ -269,7 +261,6 @@ fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'),
 fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 st.plotly_chart(fig_dof, use_container_width=True)
 
-# Chart 2: Final Action Date
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
 fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'), 
                   x='Bulletin_Date', y=list(('EB2', 'EB3')), 
@@ -279,6 +270,14 @@ fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'),
 fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 st.plotly_chart(fig_fad, use_container_width=True)
 
-# Data Table
 with st.expander("View Scraped Raw Data"):
     st.dataframe(df.sort_values(by="Bulletin_Date", ascending=False).reset_index(drop=True))
+    
+    # --- NEW: Download Button ---
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Database to File",
+        data=csv,
+        file_name='eb2_india_data.csv',
+        mime='text/csv',
+    )
