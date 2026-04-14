@@ -52,36 +52,10 @@ def get_bulletin_url(month_name, year):
     fiscal_year = year + 1 if month_idx >= 10 else year
     return f"https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin/{fiscal_year}/visa-bulletin-for-{month_name.lower()}-{year}.html"
 
-def fetch_html_content(url):
-    """Uses Multiple Fallbacks including the Wayback Machine to bypass the Firewall"""
-    headers = dict()
-    headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    
-    # We rotate through direct access, the Internet Archive, and a public proxy
-    urls_to_try = (
-        url,
-        "https://web.archive.org/web/2/" + url,
-        "https://api.codetabs.com/v1/proxy?quest=" + url
-    )
-
-    for proxy_url in urls_to_try:
-        try:
-            res = requests.get(proxy_url, headers=headers, timeout=15)
-            if res.status_code == 200 and "Access Denied" not in res.text:
-                return res.text
-        except Exception:
-            pass
-
-    return None
-
 # --- SCRAPING LOGIC ---
 def extract_india_dates(df_table):
-    raw_data = list()
-    
-    if isinstance(df_table.columns, pd.MultiIndex):
-        raw_data.extend(list(list(c) for c in df_table.columns.values))
-    else:
-        raw_data.append(df_table.columns.values.tolist())
+    cols_as_list = df_table.columns.values.tolist()
+    raw_data = list((cols_as_list,))
     raw_data.extend(df_table.values.tolist())
     
     india_col_idx = None
@@ -99,41 +73,44 @@ def extract_india_dates(df_table):
     for i, row in enumerate(raw_data):
         for cell in row:
             cell_str = str(cell).upper()
-            if second_row_idx is None and "2ND" in cell_str:
+            if second_row_idx is None and re.search(r'\b2ND\b', cell_str):
                 second_row_idx = i
-            if third_row_idx is None and "3RD" in cell_str:
+            if third_row_idx is None and re.search(r'\b3RD\b', cell_str):
                 third_row_idx = i
+        if second_row_idx is not None and third_row_idx is not None:
+            break
             
     eb2_date, eb3_date = None, None
     if india_col_idx is not None:
-        if second_row_idx is not None and second_row_idx < len(raw_data):
-            try: eb2_date = raw_data[second_row_idx][india_col_idx]
-            except Exception: pass
-        if third_row_idx is not None and third_row_idx < len(raw_data):
-            try: eb3_date = raw_data[third_row_idx][india_col_idx]
-            except Exception: pass
+        for i, row in enumerate(raw_data):
+            if i == second_row_idx:
+                for j, cell in enumerate(row):
+                    if j == india_col_idx: eb2_date = cell
+            if i == third_row_idx:
+                for j, cell in enumerate(row):
+                    if j == india_col_idx: eb3_date = cell
                         
     return eb2_date, eb3_date
 
 def fetch_bulletin_dates(month_name, year):
     url = get_bulletin_url(month_name, year)
-    html_content = fetch_html_content(url)
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    if not html_content:
-        return pd.NaT, pd.NaT, pd.NaT, pd.NaT
-        
     try:
-        tables = pd.read_html(html_content)
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200: 
+            return pd.NaT, pd.NaT, pd.NaT, pd.NaT
+        
+        soup = BeautifulSoup(response.content, 'lxml')
+        tables = pd.read_html(str(soup))
         
         dates_found_eb2 = list()
         dates_found_eb3 = list()
         
         for df_table in tables:
             eb2_d, eb3_d = extract_india_dates(df_table)
-            if eb2_d is not None and str(eb2_d).strip() != "": 
-                dates_found_eb2.append(eb2_d)
-            if eb3_d is not None and str(eb3_d).strip() != "": 
-                dates_found_eb3.append(eb3_d)
+            if eb2_d: dates_found_eb2.append(eb2_d)
+            if eb3_d: dates_found_eb3.append(eb3_d)
                 
         bulletin_date = pd.to_datetime(f"01 {month_name} {year}")
         eb2_fad, eb2_dof, eb3_fad, eb3_dof = pd.NaT, pd.NaT, pd.NaT, pd.NaT
@@ -180,11 +157,9 @@ def init_or_update_db():
         status_text = st.empty()
         
         new_rows = list()
-        skipped_count = 0
-        
         for i, d in enumerate(missing_dates):
             month_name = MONTHS_DICT.get(d.month)
-            status_text.text(f"Fetching {month_name.capitalize()} {d.year} (via Archive)...")
+            status_text.text(f"Scraping {month_name.capitalize()} {d.year}...")
             
             eb2_fad, eb2_dof, eb3_fad, eb3_dof = fetch_bulletin_dates(month_name, d.year)
             
@@ -192,7 +167,6 @@ def init_or_update_db():
                 if d >= current_month_start:
                     break 
                 else:
-                    skipped_count += 1
                     continue
             
             new_rows.append(dict(
@@ -204,26 +178,26 @@ def init_or_update_db():
             ))
             
             progress_bar.progress((i + 1) / len(missing_dates))
-            time.sleep(0.5) 
+            time.sleep(0.3) 
             
         if new_rows:
             df_new = pd.DataFrame(new_rows)
             df = pd.concat((df, df_new), ignore_index=True)
             df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
             df.to_csv(DATA_FILE, index=False)
-            status_text.success("Database synced!")
+            status_text.text("Database fully synchronized with State Dept real dates!")
             time.sleep(2)
             st.rerun()
         else:
             time.sleep(1)
-            status_text.error("Network firewall blocked the request entirely. Run app locally to generate CSV.")
+            status_text.empty()
             progress_bar.empty()
         
     return df
 
 # --- UI & CHARTS ---
 st.title("📈 EB-2 & EB-3 India Visa Bulletin Tracker")
-st.markdown("Tracks Final Action Dates and Dates of Filing directly from the U.S. State Department.")
+st.markdown("Live scraping of Final Action Dates and Dates of Filing directly from the U.S. State Department.")
 
 is_admin = False
 try:
@@ -240,7 +214,7 @@ if is_admin:
                 os.remove(DATA_FILE)
                 st.rerun()
 
-with st.spinner("Bypassing firewall and fetching data..."):
+with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
 
 df_clean = df.dropna(subset=list(('EB2_Filing', 'EB2_FAD', 'EB3_Filing', 'EB3_FAD')), how='all')
@@ -249,21 +223,19 @@ col1, col2, col3 = st.columns(3)
 with col1:
     val1 = "N/A"
     if not df_clean.empty:
-        val1 = df_clean.Bulletin_Date.iloc[-1].strftime('%B %Y')
+        val1 = df_clean.Bulletin_Date.tail(1).item().strftime('%B %Y')
     st.metric(label="Latest Bulletin Month", value=val1)
     
 with col2:
     val2 = "N/A"
-    df_eb2 = df_clean.dropna(subset=list(('EB2_Filing',)))
-    if not df_eb2.empty:
-        val2 = df_eb2.EB2_Filing.iloc[-1].strftime('%d %b %Y')
+    if not df_clean.dropna(subset=list(('EB2_Filing',))).empty:
+        val2 = df_clean.dropna(subset=list(('EB2_Filing',))).EB2_Filing.tail(1).item().strftime('%d %b %Y')
     st.metric(label="Latest EB-2 Date of Filing", value=val2)
     
 with col3:
     val3 = "N/A"
-    df_eb3 = df_clean.dropna(subset=list(('EB3_Filing',)))
-    if not df_eb3.empty:
-        val3 = df_eb3.EB3_Filing.iloc[-1].strftime('%d %b %Y')
+    if not df_clean.dropna(subset=list(('EB3_Filing',))).empty:
+        val3 = df_clean.dropna(subset=list(('EB3_Filing',))).EB3_Filing.tail(1).item().strftime('%d %b %Y')
     st.metric(label="Latest EB-3 Date of Filing", value=val3)
 
 st.divider()
@@ -281,32 +253,26 @@ df_plot_fad = pd.DataFrame(dict(
 ))
 
 st.subheader("🗓️ Date of Filing Movement (EB-2 vs EB-3)")
-df_plot_dof_clean = df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all')
+fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'), 
+                  x='Bulletin_Date', y=list(('EB2', 'EB3')), 
+                  markers=True, 
+                  labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
+                  line_shape='hv')
+fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 
-if not df_plot_dof_clean.empty:
-    fig_dof = px.line(df_plot_dof_clean, 
-                      x='Bulletin_Date', y=list(('EB2', 'EB3')), 
-                      markers=True, 
-                      labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
-                      line_shape='hv')
-    fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-    st.plotly_chart(fig_dof, use_container_width=True, key="dof_chart")
-else:
-    st.info("No data available to plot Date of Filing. Please upload historical CSV.")
+# Added unique key: 'dof_chart'
+st.plotly_chart(fig_dof, use_container_width=True, key="dof_chart")
 
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
-df_plot_fad_clean = df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all')
+fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'), 
+                  x='Bulletin_Date', y=list(('EB2', 'EB3')), 
+                  markers=True, 
+                  labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
+                  line_shape='hv')
+fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 
-if not df_plot_fad_clean.empty:
-    fig_fad = px.line(df_plot_fad_clean, 
-                      x='Bulletin_Date', y=list(('EB2', 'EB3')), 
-                      markers=True, 
-                      labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
-                      line_shape='hv')
-    fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-    st.plotly_chart(fig_fad, use_container_width=True, key="fad_chart")
-else:
-    st.info("No data available to plot Final Action Date. Please upload historical CSV.")
+# Added unique key: 'fad_chart'
+st.plotly_chart(fig_fad, use_container_width=True, key="fad_chart")
 
 with st.expander("View Scraped Raw Data"):
     st.dataframe(df.sort_values(by="Bulletin_Date", ascending=False).reset_index(drop=True))
