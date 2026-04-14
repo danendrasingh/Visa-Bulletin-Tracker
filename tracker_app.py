@@ -259,7 +259,9 @@ fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'),
                   labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
 fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-st.plotly_chart(fig_dof, use_container_width=True)
+
+# Added unique key: 'dof_chart'
+st.plotly_chart(fig_dof, use_container_width=True, key="dof_chart")
 
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
 fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'), 
@@ -268,12 +270,13 @@ fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'),
                   labels=dict(Bulletin_Date='Visa Bulletin Release Month', value='Cutoff Priority Date', variable='Category'),
                   line_shape='hv')
 fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
-st.plotly_chart(fig_fad, use_container_width=True)
+
+# Added unique key: 'fad_chart'
+st.plotly_chart(fig_fad, use_container_width=True, key="fad_chart")
 
 with st.expander("View Scraped Raw Data"):
     st.dataframe(df.sort_values(by="Bulletin_Date", ascending=False).reset_index(drop=True))
     
-    # --- NEW: Download Button ---
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 Download Database to File",
