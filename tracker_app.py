@@ -94,9 +94,9 @@ def extract_india_dates(df_table):
 
 def fetch_bulletin_dates(month_name, year):
     url = get_bulletin_url(month_name, year)
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
-    # Using a tuple to try direct request first, then a proxy if the firewall blocks Streamlit
+    # REPAIRED: Added back the proxy fallback to bypass the Akamai Firewall
     urls_to_try = (
         url,
         "https://api.allorigins.win/raw?url=" + url
@@ -105,7 +105,7 @@ def fetch_bulletin_dates(month_name, year):
     html_content = None
     for target_url in urls_to_try:
         try:
-            response = requests.get(target_url, headers=headers, timeout=10)
+            response = requests.get(target_url, headers=headers, timeout=15)
             if response.status_code == 200 and "Access Denied" not in response.text: 
                 html_content = response.content
                 break
@@ -124,8 +124,11 @@ def fetch_bulletin_dates(month_name, year):
         
         for df_table in tables:
             eb2_d, eb3_d = extract_india_dates(df_table)
-            if eb2_d: dates_found_eb2.append(eb2_d)
-            if eb3_d: dates_found_eb3.append(eb3_d)
+            # Extra guard to prevent empty 'NaN' tables from breaking the logic
+            if eb2_d is not None and str(eb2_d).strip().lower() not in ("", "nan"): 
+                dates_found_eb2.append(eb2_d)
+            if eb3_d is not None and str(eb3_d).strip().lower() not in ("", "nan"): 
+                dates_found_eb3.append(eb3_d)
                 
         bulletin_date = pd.to_datetime(f"01 {month_name} {year}")
         eb2_fad, eb2_dof, eb3_fad, eb3_dof = pd.NaT, pd.NaT, pd.NaT, pd.NaT
@@ -180,6 +183,9 @@ def init_or_update_db():
             
             if pd.isna(eb2_fad) and pd.isna(eb3_fad):
                 if d >= current_month_start:
+                    # Added visual debug so it won't fail silently anymore!
+                    status_text.info(f"The {month_name.capitalize()} {d.year} bulletin is either unreleased or temporarily blocked by a firewall.")
+                    time.sleep(2)
                     break 
                 else:
                     continue
@@ -197,23 +203,19 @@ def init_or_update_db():
             
         if new_rows:
             df_new = pd.DataFrame(new_rows)
-            # Combine the old cache data with the newly scraped memory data
             df = pd.concat((df, df_new), ignore_index=True)
             df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
             
-            # Attempt to save to local cloud storage (even if temporary)
             try:
                 df.to_csv(DATA_FILE, index=False)
             except Exception:
                 pass
                 
-            status_text.success("Successfully fetched new data for this session!")
-            time.sleep(1.5)
+            status_text.success(f"Successfully appended {len(new_rows)} new month(s) of data to the charts!")
+            time.sleep(2)
             status_text.empty()
             progress_bar.empty()
             
-            # CRITICAL FIX: Removed st.rerun() here to prevent infinite loop.
-            # It will naturally return the appended `df` directly to the charts below!
         else:
             time.sleep(1)
             status_text.empty()
@@ -238,9 +240,7 @@ if is_admin:
         if st.button("Delete Database & Re-Scrape"):
             if os.path.exists(DATA_FILE):
                 os.remove(DATA_FILE)
-                # Using a safe fallback if rerun doesn't exist on older instances
-                try: st.rerun()
-                except Exception: st.experimental_rerun()
+                st.rerun()
 
 with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
