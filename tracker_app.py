@@ -96,12 +96,27 @@ def fetch_bulletin_dates(month_name, year):
     url = get_bulletin_url(month_name, year)
     headers = {"User-Agent": "Mozilla/5.0"}
     
+    # Using a tuple to try direct request first, then a proxy if the firewall blocks Streamlit
+    urls_to_try = (
+        url,
+        "https://api.allorigins.win/raw?url=" + url
+    )
+    
+    html_content = None
+    for target_url in urls_to_try:
+        try:
+            response = requests.get(target_url, headers=headers, timeout=10)
+            if response.status_code == 200 and "Access Denied" not in response.text: 
+                html_content = response.content
+                break
+        except Exception:
+            pass
+            
+    if not html_content:
+        return pd.NaT, pd.NaT, pd.NaT, pd.NaT
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200: 
-            return pd.NaT, pd.NaT, pd.NaT, pd.NaT
-        
-        soup = BeautifulSoup(response.content, 'lxml')
+        soup = BeautifulSoup(html_content, 'lxml')
         tables = pd.read_html(str(soup))
         
         dates_found_eb2 = list()
@@ -159,7 +174,7 @@ def init_or_update_db():
         new_rows = list()
         for i, d in enumerate(missing_dates):
             month_name = MONTHS_DICT.get(d.month)
-            status_text.text(f"Scraping {month_name.capitalize()} {d.year}...")
+            status_text.text(f"Scraping missing {month_name.capitalize()} {d.year} data...")
             
             eb2_fad, eb2_dof, eb3_fad, eb3_dof = fetch_bulletin_dates(month_name, d.year)
             
@@ -182,12 +197,23 @@ def init_or_update_db():
             
         if new_rows:
             df_new = pd.DataFrame(new_rows)
+            # Combine the old cache data with the newly scraped memory data
             df = pd.concat((df, df_new), ignore_index=True)
             df = df.sort_values(by='Bulletin_Date').reset_index(drop=True)
-            df.to_csv(DATA_FILE, index=False)
-            status_text.text("Database fully synchronized with State Dept real dates!")
-            time.sleep(2)
-            st.rerun()
+            
+            # Attempt to save to local cloud storage (even if temporary)
+            try:
+                df.to_csv(DATA_FILE, index=False)
+            except Exception:
+                pass
+                
+            status_text.success("Successfully fetched new data for this session!")
+            time.sleep(1.5)
+            status_text.empty()
+            progress_bar.empty()
+            
+            # CRITICAL FIX: Removed st.rerun() here to prevent infinite loop.
+            # It will naturally return the appended `df` directly to the charts below!
         else:
             time.sleep(1)
             status_text.empty()
@@ -212,7 +238,9 @@ if is_admin:
         if st.button("Delete Database & Re-Scrape"):
             if os.path.exists(DATA_FILE):
                 os.remove(DATA_FILE)
-                st.rerun()
+                # Using a safe fallback if rerun doesn't exist on older instances
+                try: st.rerun()
+                except Exception: st.experimental_rerun()
 
 with st.spinner("Checking for missing bulletin releases..."):
     df = init_or_update_db()
@@ -260,7 +288,6 @@ fig_dof = px.line(df_plot_dof.dropna(subset=list(('EB2', 'EB3')), how='all'),
                   line_shape='hv')
 fig_dof.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 
-# Added unique key: 'dof_chart'
 st.plotly_chart(fig_dof, use_container_width=True, key="dof_chart")
 
 st.subheader("⚖️ Final Action Date Movement (EB-2 vs EB-3)")
@@ -271,7 +298,6 @@ fig_fad = px.line(df_plot_fad.dropna(subset=list(('EB2', 'EB3')), how='all'),
                   line_shape='hv')
 fig_fad.update_layout(yaxis=dict(tickformat="%b %Y"), xaxis=dict(tickformat="%b %Y"))
 
-# Added unique key: 'fad_chart'
 st.plotly_chart(fig_fad, use_container_width=True, key="fad_chart")
 
 with st.expander("View Scraped Raw Data"):
@@ -279,8 +305,8 @@ with st.expander("View Scraped Raw Data"):
     
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Download Database to File",
+        label="📥 Download Updated Database to File",
         data=csv,
-        file_name='eb2_india_data.csv',
+        file_name='eb2_india_data_updated.csv',
         mime='text/csv',
     )
